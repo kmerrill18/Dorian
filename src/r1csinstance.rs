@@ -25,7 +25,6 @@ pub struct R1CSInstance {
   C: SparseMatPolynomial,
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct R1CSCommitmentGens {
   gens: SparseMatPolyCommitmentGens,
 }
@@ -64,7 +63,6 @@ impl AppendToTranscript for R1CSCommitment {
   }
 }
 
-#[derive(Serialize, Deserialize)]
 pub struct R1CSDecommitment {
   dense: MultiSparseMatPolynomialAsDense,
 }
@@ -112,24 +110,21 @@ impl R1CSInstance {
     let num_poly_vars_x = num_cons.log_2();
     let num_poly_vars_y = (2 * num_vars).log_2();
 
-    let mat_A = A
-      .iter()
-      .map(|(row, col, val)| SparseMatEntry::new(*row, *col, *val))
+    let mat_A = (0..A.len())
+      .map(|i| SparseMatEntry::new(A[i].0, A[i].1, A[i].2))
       .collect::<Vec<SparseMatEntry>>();
-    let mat_B = B
-      .iter()
-      .map(|(row, col, val)| SparseMatEntry::new(*row, *col, *val))
+    let mat_B = (0..B.len())
+      .map(|i| SparseMatEntry::new(B[i].0, B[i].1, B[i].2))
       .collect::<Vec<SparseMatEntry>>();
-    let mat_C = C
-      .iter()
-      .map(|(row, col, val)| SparseMatEntry::new(*row, *col, *val))
+    let mat_C = (0..C.len())
+      .map(|i| SparseMatEntry::new(C[i].0, C[i].1, C[i].2))
       .collect::<Vec<SparseMatEntry>>();
 
     let poly_A = SparseMatPolynomial::new(num_poly_vars_x, num_poly_vars_y, mat_A);
     let poly_B = SparseMatPolynomial::new(num_poly_vars_x, num_poly_vars_y, mat_B);
     let poly_C = SparseMatPolynomial::new(num_poly_vars_x, num_poly_vars_y, mat_C);
 
-    Self {
+    R1CSInstance {
       num_cons,
       num_vars,
       num_inputs,
@@ -152,9 +147,11 @@ impl R1CSInstance {
   }
 
   pub fn get_digest(&self) -> Vec<u8> {
-    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-    bincode::serialize_into(&mut encoder, &self).unwrap();
-    encoder.finish().unwrap()
+    // let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    // bincode::serialize_into(&mut encoder, &self).unwrap();
+    // encoder.finish().unwrap()
+    use digest::Digest;
+    sha3::Sha3_256::digest(&bincode::serialize(&self).unwrap()).to_vec()
   }
 
   pub fn produce_synthetic_r1cs(
@@ -262,9 +259,84 @@ impl R1CSInstance {
     assert_eq!(Az.len(), self.num_cons);
     assert_eq!(Bz.len(), self.num_cons);
     assert_eq!(Cz.len(), self.num_cons);
-    (0..self.num_cons).all(|i| Az[i] * Bz[i] == Cz[i])
+    let res: usize = (0..self.num_cons)
+      .map(|i| usize::from(Az[i] * Bz[i] != Cz[i]))
+      .sum();
+
+    res == 0
   }
 
+  #[cfg(debug_assertions)]
+  pub fn is_sat_debug(&self, vars: &[Scalar], input: &[Scalar]) -> bool {
+    assert_eq!(vars.len(), self.num_vars);
+    assert_eq!(input.len(), self.num_inputs);
+
+    let z = {
+      let mut z = vars.to_vec();
+      z.extend(&vec![Scalar::one()]);
+      z.extend(input);
+      z
+    };
+
+    // verify if Az * Bz - Cz = [0...]
+    let Az = self
+      .A
+      .multiply_vec(self.num_cons, self.num_vars + self.num_inputs + 1, &z);
+    let Bz = self
+      .B
+      .multiply_vec(self.num_cons, self.num_vars + self.num_inputs + 1, &z);
+    let Cz = self
+      .C
+      .multiply_vec(self.num_cons, self.num_vars + self.num_inputs + 1, &z);
+
+    assert_eq!(Az.len(), self.num_cons);
+    assert_eq!(Bz.len(), self.num_cons);
+    assert_eq!(Cz.len(), self.num_cons);
+    let res: usize = (0..self.num_cons)
+      .map(|i| usize::from(Az[i] * Bz[i] != Cz[i]))
+      .sum();
+
+    let mut min_fail_col = 100000;
+    for i in 0..self.num_cons {
+      if usize::from(Az[i] * Bz[i] != Cz[i]) != 0 {
+        let mut max_fail_col = 0;
+        let mut first_fail = false;
+        for SparseMatEntry {row, col, val} in self.A.M.iter() {
+          if i == *row {
+            if *col > max_fail_col {
+              max_fail_col = *col;
+            }
+          }
+        }
+        for SparseMatEntry {row, col, val} in self.B.M.iter() {
+          if i == *row {
+            if *col > max_fail_col {
+              max_fail_col = *col;
+            }
+          }
+        }
+        for SparseMatEntry {row, col, val} in self.C.M.iter() {
+          if i == *row {
+            if *col > max_fail_col {
+              max_fail_col = *col;
+            }
+          }
+        }
+
+        if max_fail_col < min_fail_col {
+          min_fail_col = max_fail_col;
+        }
+        println!(
+          "Constraint {} failed",
+          i
+        );
+      }
+    } 
+    println!("min_fail_col = {}", min_fail_col);
+    res == 0
+  }
+
+  #[cfg(not(feature = "multicore"))]
   pub fn multiply_vec(
     &self,
     num_rows: usize,
@@ -281,6 +353,30 @@ impl R1CSInstance {
     )
   }
 
+  #[cfg(feature = "multicore")]
+  pub fn multiply_vec(
+    &self,
+    num_rows: usize,
+    num_cols: usize,
+    z: &[Scalar],
+  ) -> (DensePolynomial, DensePolynomial, DensePolynomial) {
+    assert_eq!(num_rows, self.num_cons);
+    assert_eq!(z.len(), num_cols);
+    assert!(num_cols > self.num_vars);
+
+    // Use rayon's parallel iterator to compute A*z, B*z, and C*z in parallel
+    let (Az, (Bz, Cz)) = rayon::join(
+      || DensePolynomial::new(self.A.multiply_vec(num_rows, num_cols, z)),
+      || rayon::join(
+        || DensePolynomial::new(self.B.multiply_vec(num_rows, num_cols, z)),
+        || DensePolynomial::new(self.C.multiply_vec(num_rows, num_cols, z)),
+      ),
+    );
+
+    (Az, Bz, Cz)
+  }
+
+  #[cfg(not(feature = "multicore"))]
   pub fn compute_eval_table_sparse(
     &self,
     num_rows: usize,
@@ -297,6 +393,28 @@ impl R1CSInstance {
     (evals_A, evals_B, evals_C)
   }
 
+  #[cfg(feature = "multicore")]
+  pub fn compute_eval_table_sparse(
+      &self,
+      num_rows: usize,
+      num_cols: usize,
+      evals: &[Scalar],
+  ) -> (Vec<Scalar>, Vec<Scalar>, Vec<Scalar>) {
+      assert_eq!(num_rows, self.num_cons);
+      assert!(num_cols > self.num_vars);
+
+      // Use rayon's parallel iterator to compute evals_A, evals_B, and evals_C in parallel
+      let (evals_A, (evals_B, evals_C)) = rayon::join(
+          || self.A.compute_eval_table_sparse(evals, num_rows, num_cols),
+          || rayon::join(
+              || self.B.compute_eval_table_sparse(evals, num_rows, num_cols),
+              || self.C.compute_eval_table_sparse(evals, num_rows, num_cols),
+          ),
+      );
+
+      (evals_A, evals_B, evals_C)
+  }
+  
   pub fn evaluate(&self, rx: &[Scalar], ry: &[Scalar]) -> (Scalar, Scalar, Scalar) {
     let evals = SparseMatPolynomial::multi_evaluate(&[&self.A, &self.B, &self.C], rx, ry);
     (evals[0], evals[1], evals[2])

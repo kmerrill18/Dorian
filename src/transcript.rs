@@ -1,4 +1,4 @@
-use super::group::CompressedGroup;
+use super::group::{CompressedGroup, AsBytesDev};
 use super::scalar::Scalar;
 use merlin::Transcript;
 
@@ -21,6 +21,7 @@ impl ProofTranscript for Transcript {
 
   fn append_point(&mut self, label: &'static [u8], point: &CompressedGroup) {
     self.append_message(label, point.as_bytes());
+    // self.append_message(label, point);
   }
 
   fn challenge_scalar(&mut self, label: &'static [u8]) -> Scalar {

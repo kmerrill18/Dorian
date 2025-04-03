@@ -1,13 +1,15 @@
 #![allow(non_snake_case)]
-#![doc = include_str!("../README.md")]
-#![deny(missing_docs)]
+// #![doc = include_str!("../README.md")]
+// #![deny(missing_docs)]
 #![allow(clippy::assertions_on_result_states)]
 
+// https://github.com/microsoft/Spartan/tree/master
 extern crate byteorder;
 extern crate core;
 extern crate curve25519_dalek;
 extern crate digest;
 extern crate merlin;
+extern crate rand;
 extern crate sha3;
 
 #[cfg(feature = "multicore")]
@@ -15,6 +17,7 @@ extern crate rayon;
 
 mod commitments;
 mod dense_mlpoly;
+pub use dense_mlpoly::DensePolynomial;
 mod errors;
 mod group;
 mod math;
@@ -22,8 +25,9 @@ mod nizk;
 mod product_tree;
 mod r1csinstance;
 mod r1csproof;
+mod ir1csproof;
 mod random;
-mod scalar;
+pub mod scalar;
 mod sparse_mlpoly;
 mod sumcheck;
 mod timer;
@@ -37,26 +41,27 @@ use r1csinstance::{
   R1CSCommitment, R1CSCommitmentGens, R1CSDecommitment, R1CSEvalProof, R1CSInstance,
 };
 use r1csproof::{R1CSGens, R1CSProof};
+use ir1csproof::IR1CSGens;
+use ir1csproof::IR1CSProof;
 use random::RandomTape;
 use scalar::Scalar;
 use serde::{Deserialize, Serialize};
 use timer::Timer;
 use transcript::{AppendToTranscript, ProofTranscript};
+use crate::dense_mlpoly::{PolyCommitment, PolyCommitmentBlinds};
 
 /// `ComputationCommitment` holds a public preprocessed NP statement (e.g., R1CS)
-#[derive(Serialize, Deserialize)]
 pub struct ComputationCommitment {
   comm: R1CSCommitment,
 }
 
 /// `ComputationDecommitment` holds information to decommit `ComputationCommitment`
-#[derive(Serialize, Deserialize)]
 pub struct ComputationDecommitment {
   decomm: R1CSDecommitment,
 }
 
 /// `Assignment` holds an assignment of values to either the inputs or variables in an `Instance`
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct Assignment {
   assignment: Vec<Scalar>,
 }
@@ -104,6 +109,14 @@ impl Assignment {
       assignment: padded_assignment,
     }
   }
+
+  /// pads Assignment to the specified length
+  pub fn pad_inner(assignment: &mut Vec<Scalar>, len: usize) {
+    // check that the new length is higher than current length
+    assert!(len > assignment.len());
+
+    assignment.extend(vec![Scalar::zero(); len - assignment.len()]);
+  }
 }
 
 /// `VarsAssignment` holds an assignment of values to variables in an `Instance`
@@ -113,6 +126,7 @@ pub type VarsAssignment = Assignment;
 pub type InputsAssignment = Assignment;
 
 /// `Instance` holds the description of R1CS matrices and a hash of the matrices
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Instance {
   inst: R1CSInstance,
   digest: Vec<u8>,
@@ -277,7 +291,6 @@ impl Instance {
 }
 
 /// `SNARKGens` holds public parameters for producing and verifying proofs with the Spartan SNARK
-#[derive(Serialize, Deserialize)]
 pub struct SNARKGens {
   gens_r1cs_sat: R1CSGens,
   gens_r1cs_eval: R1CSCommitmentGens,
@@ -467,6 +480,7 @@ impl SNARK {
 }
 
 /// `NIZKGens` holds public parameters for producing and verifying proofs with the Spartan NIZK
+#[derive(Serialize, Deserialize)] 
 pub struct NIZKGens {
   gens_r1cs_sat: R1CSGens,
 }
@@ -484,6 +498,45 @@ impl NIZKGens {
 
     let gens_r1cs_sat = R1CSGens::new(b"gens_r1cs_sat", num_cons, num_vars_padded);
     NIZKGens { gens_r1cs_sat }
+  }
+}
+
+
+/// `NIZKRandGens` holds public parameters for producing and verifying proofs with the random extension of Spartan NIZK 
+#[derive(Serialize, Deserialize)] 
+pub struct NIZKRandGens {
+  gens_r1cs_sat: IR1CSGens,
+  // polys: Vec<DensePolynomial>,
+  pub pubinp_len: Vec<usize>,
+  pub wit_len: Vec<usize>
+}
+
+impl NIZKRandGens {
+  /// Constructs a new `NIZKRandGens`
+  pub fn new(
+      num_cons: usize, 
+      pubinp_len: &[usize], 
+      wit_len: &[usize],
+  ) -> Self {
+    let num_inputs = pubinp_len.iter().sum::<usize>();
+    let num_vars = wit_len.iter().sum::<usize>();
+
+    let mut num_vars_padded = max(num_vars, num_inputs + 1);
+    if num_vars_padded != num_vars_padded.next_power_of_two() {
+      num_vars_padded = num_vars_padded.next_power_of_two();
+    }
+
+    let mut wit_len_padded = wit_len.to_owned();
+    if num_vars_padded != num_vars {
+      // println!("last wit len {}", wit_len[wit_len.len()-1]);
+      wit_len_padded[wit_len.len()-1] = wit_len_padded[wit_len.len()-1] + num_vars_padded - num_vars;
+    }
+    // println!("last wit len {}", wit_len_padded[wit_len.len()-1]);
+    Self {
+      gens_r1cs_sat: IR1CSGens::new(b"gens_r1cs_sat", num_cons, &wit_len_padded), 
+      pubinp_len: pubinp_len.to_owned(),
+      wit_len: wit_len_padded.clone() // wit_len.clone()
+    }
   }
 }
 
@@ -588,6 +641,206 @@ impl NIZK {
   }
 }
 
+/// Intermediate values for the NIZKRand protocol
+pub struct NIZKRandInter {
+  // input: InputsAssignment,
+  input: Vec<Scalar>,
+  wit: Vec<Scalar>,
+  poly_vars_vec: Vec<DensePolynomial>,
+  comm_vars_vec: Vec<PolyCommitment>,
+  blinds_vars_vec: Vec<PolyCommitmentBlinds>,
+  random_tape: RandomTape,
+}
+
+impl NIZKRandInter {
+  /// Constructs a new `NIZKRandInter` from a vector
+  pub fn new(input: &InputsAssignment) -> NIZKRandInter {
+    NIZKRandInter {
+      input: input.assignment.clone(),
+      wit: Vec::new(),
+      poly_vars_vec: Vec::new(),
+      comm_vars_vec: Vec::new(),
+      blinds_vars_vec: Vec::new(),
+      random_tape: RandomTape::new(b"proof"),
+    }
+  }
+}
+
+/// `NIZKRand` holds a proof produced by Spartan NIZK supporting verifier randomness
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NIZKRand {
+  r1cs_sat_proof: IR1CSProof,
+  r: (Vec<Scalar>, Vec<Scalar>),
+}
+
+impl NIZKRand {
+  fn protocol_name() -> &'static [u8] {
+    b"Spartan NIZK proof with verifier randomness"
+  }
+
+  pub fn prove_00(
+    inst: &Instance,
+    input: &InputsAssignment,
+    gens: &NIZKRandGens,
+    transcript: &mut Transcript,
+  ) {
+    let timer_prove = Timer::new("NIZKRand::prove00");
+    assert!(gens.wit_len.len() == gens.pubinp_len.len());
+    // we currently require the number of |inputs| + 1 to be at most number of vars
+    assert!(gens.pubinp_len.iter().sum::<usize>() < gens.wit_len.iter().sum::<usize>());
+    // we create a Transcript object seeded with a random Scalar
+    // to aid the prover produce its randomness
+    // let mut random_tape = RandomTape::new(b"proof");
+
+    transcript.append_protocol_name(NIZKRand::protocol_name());
+    transcript.append_message(b"R1CSInstanceDigest", &inst.digest);
+
+
+    IR1CSProof::prove_00(
+      &input.assignment,
+      transcript
+    );
+    timer_prove.stop();
+  }
+
+  pub fn prove_01(
+    inst: &Instance,
+    vars: &VarsAssignment,
+    rand_len: usize,
+    intermediate: &mut NIZKRandInter,
+    gens: &NIZKRandGens,
+    transcript: &mut Transcript,
+  ) -> Vec<Scalar> {
+    let timer_prove = Timer::new("NIZKRand::prove01");
+    let mut padded_wit = vec![Scalar::zero(); inst.inst.get_num_vars()];
+    padded_wit[intermediate.wit.len()..intermediate.wit.len() + vars.assignment.len()].copy_from_slice(&vars.assignment);
+    let verifier_rand: Vec<Scalar> = IR1CSProof::prove_01(
+      // &vars.assignment,
+      &padded_wit,
+      rand_len,
+      &mut intermediate.poly_vars_vec,
+      &mut intermediate.comm_vars_vec,
+      &mut intermediate.blinds_vars_vec,
+      &gens.gens_r1cs_sat,
+      transcript,
+      &mut intermediate.random_tape,
+    );
+    intermediate.wit.extend(vars.assignment.clone());
+    intermediate.input.extend(verifier_rand.clone());
+    timer_prove.stop();
+    verifier_rand
+  }
+
+  pub fn prove_1(
+    inst: &Instance,
+    vars: &VarsAssignment,
+    intermediate: &mut NIZKRandInter,
+    gens: &NIZKRandGens,
+    transcript: &mut Transcript,
+  ) -> Self {
+    let timer_prove = Timer::new("NIZKRand::prove1");
+
+    let (r1cs_sat_proof, rx, ry) = {
+      // we might need to pad variables
+      // let mut padded_wit = vec![Scalar::zero(); inst.inst.get_num_vars()];
+      // padded_wit[intermediate.wit.len()..intermediate.wit.len() + vars.assignment.len()].copy_from_slice(&vars.assignment);
+
+      let (proof, rx, ry) = IR1CSProof::prove_1(
+        &inst.inst,
+        &vars.assignment,
+        &intermediate.wit,
+        &intermediate.input,
+        &mut intermediate.poly_vars_vec,
+        &mut intermediate.comm_vars_vec,
+        &mut intermediate.blinds_vars_vec,
+        &gens.gens_r1cs_sat,
+        transcript,
+        &mut intermediate.random_tape,
+      );
+      // let proof_encoded: Vec<u8> = bincode::serialize(&proof).unwrap();
+      // Timer::print(&format!("len_r1cs_sat_proof {:?}", proof_encoded.len()));
+      (proof, rx, ry)
+    };
+
+    #[cfg(feature = "bench")]
+    {
+      let proof_encoded: Vec<u8> = bincode::serialize(&r1cs_sat_proof).unwrap();
+      let mut n_gp_elements = 0;
+      for commit in &r1cs_sat_proof.comm_vars_vec {
+        n_gp_elements += commit.C.len();
+      }
+      n_gp_elements += r1cs_sat_proof.sc_proof_phase1.num_gp_elements(); // one ZKSumcheckInstanceProof
+      n_gp_elements += 4; // claims_phase2
+      n_gp_elements += 1 + 3 + 1*2; // Knowledge proof (1), Product Proof (3) and Equality Proof *2 (=1*2)
+      n_gp_elements += r1cs_sat_proof.sc_proof_phase2.num_gp_elements(); // one ZKSumcheckInstanceProof
+      n_gp_elements += r1cs_sat_proof.comm_vars_at_ry_vec.len();
+      for proof in &r1cs_sat_proof.proof_eval_vars_at_ry_vec {
+        n_gp_elements += proof.num_gp_elements();
+      }
+      let proof_size = proof_encoded.len() - n_gp_elements * 41 + n_gp_elements * 33;
+      // println!("n_gp_elements: {}", n_gp_elements);
+      Timer::print(&format!("len_r1cs_sat_proof {:?}", proof_size));
+      use crate::group::{GroupElement, CompressedGroup};
+
+      // let generator_compress: CompressedGroup = GroupElement::generator().compress();
+      // let default_gp_elel: Vec<u8> = bincode::serialize(&generator_compress).unwrap();
+      // Timer::print(&format!("len_gp_ele {:?}", default_gp_elel.len()));
+    }
+
+    timer_prove.stop();
+    NIZKRand {
+      r1cs_sat_proof,
+      r: (rx, ry),
+    }
+  }
+
+  /// A method to verify a NIZKRand proof of the satisfiability of an R1CS instance
+  pub fn verify(
+    &self,
+    inst: &Instance,
+    input: &mut InputsAssignment,
+    transcript: &mut Transcript,
+    gens: &NIZKRandGens,
+  ) -> Result<(), ProofVerifyError> {
+    let timer_verify = Timer::new("NIZK::verify");
+
+    transcript.append_protocol_name(NIZKRand::protocol_name());
+    transcript.append_message(b"R1CSInstanceDigest", &inst.digest);
+
+    // We send evaluations of A, B, C at r = (rx, ry) as claims
+    // to enable the verifier complete the first sum-check
+    let timer_eval = Timer::new("eval_sparse_polys");
+    let (claimed_rx, claimed_ry) = &self.r;
+    let inst_evals = inst.inst.evaluate(claimed_rx, claimed_ry);
+    timer_eval.stop();
+
+    let timer_sat_proof = Timer::new("verify_sat_proof");
+    assert_eq!(input.assignment.len(), gens.pubinp_len[0], "input len: {}, pubinp_len: {}", input.assignment.len(), gens.pubinp_len[0]);
+    assert_eq!(gens.pubinp_len.iter().sum::<usize>(), // for debug only
+               inst.inst.get_num_inputs(),
+                "pubinp_len: {}, num_inputs: {}", gens.pubinp_len.iter().sum::<usize>(), inst.inst.get_num_inputs()
+              );
+    let (rx, ry) = self.r1cs_sat_proof.verify(
+      inst.inst.get_num_vars(),
+      inst.inst.get_num_cons(),
+      &gens.pubinp_len,
+      &mut input.assignment,
+      &inst_evals,
+      transcript,
+      &gens.gens_r1cs_sat,
+    )?;
+
+    // verify if claimed rx and ry are correct
+    assert_eq!(rx, *claimed_rx);
+    assert_eq!(ry, *claimed_ry);
+    timer_sat_proof.stop();
+    timer_verify.stop();
+
+    Ok(())
+  }
+
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -657,10 +910,11 @@ mod tests {
       0,
     ];
 
-    let larger_than_mod = [
-      3, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8, 216,
-      57, 51, 72, 125, 157, 41, 83, 167, 237, 115,
-    ];
+    let larger_than_mod = [255; 32];
+    // [
+    //   3, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8, 216,
+    //   57, 51, 72, 125, 157, 41, 83, 167, 237, 115,
+    // ];
 
     let A = vec![(0, 0, zero)];
     let B = vec![(1, 1, larger_than_mod)];

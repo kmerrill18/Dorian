@@ -18,6 +18,8 @@ use core::iter;
 use merlin::Transcript;
 use serde::{Deserialize, Serialize};
 
+use super::group::CompressedGroupExt;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct R1CSProof {
   comm_vars: PolyCommitment,
@@ -36,11 +38,11 @@ pub struct R1CSProof {
   proof_eq_sc_phase2: EqualityProof,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)] 
 pub struct R1CSSumcheckGens {
-  gens_1: MultiCommitGens,
-  gens_3: MultiCommitGens,
-  gens_4: MultiCommitGens,
+  pub gens_1: MultiCommitGens,
+  pub gens_3: MultiCommitGens,
+  pub gens_4: MultiCommitGens,
 }
 
 // TODO: fix passing gens_1_ref
@@ -58,10 +60,10 @@ impl R1CSSumcheckGens {
   }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)] 
 pub struct R1CSGens {
-  gens_sc: R1CSSumcheckGens,
-  gens_pc: PolyCommitmentGens,
+  pub gens_sc: R1CSSumcheckGens,
+  pub gens_pc: PolyCommitmentGens,
 }
 
 impl R1CSGens {
@@ -74,7 +76,17 @@ impl R1CSGens {
 }
 
 impl R1CSProof {
-  fn prove_phase_one(
+  #[inline]
+  fn comb_func_sc_one(
+    poly_A_comp: &Scalar,
+    poly_B_comp: &Scalar,
+    poly_C_comp: &Scalar,
+    poly_D_comp: &Scalar
+  ) -> Scalar {
+    poly_A_comp * (poly_B_comp * poly_C_comp - poly_D_comp)
+  }
+  /// Prove phase one
+  pub fn prove_phase_one(
     num_rounds: usize,
     evals_tau: &mut DensePolynomial,
     evals_Az: &mut DensePolynomial,
@@ -84,11 +96,6 @@ impl R1CSProof {
     transcript: &mut Transcript,
     random_tape: &mut RandomTape,
   ) -> (ZKSumcheckInstanceProof, Vec<Scalar>, Vec<Scalar>, Scalar) {
-    let comb_func = |poly_A_comp: &Scalar,
-                     poly_B_comp: &Scalar,
-                     poly_C_comp: &Scalar,
-                     poly_D_comp: &Scalar|
-     -> Scalar { poly_A_comp * (poly_B_comp * poly_C_comp - poly_D_comp) };
 
     let (sc_proof_phase_one, r, claims, blind_claim_postsc) =
       ZKSumcheckInstanceProof::prove_cubic_with_additive_term(
@@ -99,7 +106,7 @@ impl R1CSProof {
         evals_Az,
         evals_Bz,
         evals_Cz,
-        comb_func,
+        R1CSProof::comb_func_sc_one,
         &gens.gens_1,
         &gens.gens_4,
         transcript,
@@ -109,7 +116,8 @@ impl R1CSProof {
     (sc_proof_phase_one, r, claims, blind_claim_postsc)
   }
 
-  fn prove_phase_two(
+  /// Prove phase two
+  pub fn prove_phase_two(
     num_rounds: usize,
     claim: &Scalar,
     blind_claim: &Scalar,
@@ -263,9 +271,9 @@ impl R1CSProof {
 
     let timer_sc_proof_phase2 = Timer::new("prove_sc_phase_two");
     // combine the three claims into a single claim
-    let r_A = transcript.challenge_scalar(b"challenge_Az");
-    let r_B = transcript.challenge_scalar(b"challenge_Bz");
-    let r_C = transcript.challenge_scalar(b"challenge_Cz");
+    let r_A = transcript.challenge_scalar(b"challenege_Az");
+    let r_B = transcript.challenge_scalar(b"challenege_Bz");
+    let r_C = transcript.challenge_scalar(b"challenege_Cz");
     let claim_phase2 = r_A * Az_claim + r_B * Bz_claim + r_C * Cz_claim;
     let blind_claim_phase2 = r_A * Az_blind + r_B * Bz_blind + r_C * Cz_blind;
 
@@ -418,9 +426,9 @@ impl R1CSProof {
     )?;
 
     // derive three public challenges and then derive a joint claim
-    let r_A = transcript.challenge_scalar(b"challenge_Az");
-    let r_B = transcript.challenge_scalar(b"challenge_Bz");
-    let r_C = transcript.challenge_scalar(b"challenge_Cz");
+    let r_A = transcript.challenge_scalar(b"challenege_Az");
+    let r_B = transcript.challenge_scalar(b"challenege_Bz");
+    let r_C = transcript.challenge_scalar(b"challenege_Cz");
 
     // r_A * comm_Az_claim + r_B * comm_Bz_claim + r_C * comm_Cz_claim;
     let comm_claim_phase2 = GroupElement::vartime_multiscalar_mul(

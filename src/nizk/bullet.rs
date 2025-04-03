@@ -12,6 +12,8 @@ use core::iter;
 use merlin::Transcript;
 use serde::{Deserialize, Serialize};
 
+use super::super::group::CompressedGroupExt; // added
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct BulletReductionProof {
   L_vec: Vec<CompressedGroup>,
@@ -19,6 +21,9 @@ pub struct BulletReductionProof {
 }
 
 impl BulletReductionProof {
+  pub fn num_gp_elements(&self) -> usize {
+    self.L_vec.len() + self.R_vec.len()
+  }
   /// Create an inner-product proof.
   ///
   /// The proof is created with respect to the bases \\(G\\).

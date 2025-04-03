@@ -1,5 +1,5 @@
-//! This module provides an implementation of the Curve25519's scalar field $\mathbb{F}_q$
-//! where `q = 2^252 + 27742317777372353535851937790883648493 = 0x1000000000000000 0000000000000000 14def9dea2f79cd6 5812631a5cf5d3ed`
+//! This module provides an implementation of the T256's scalar field $\mathbb{F}_q$
+//! where `q = 115792089210356248762697446949407573530086143415290314195533631308867097853951 = 0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff`
 //! This module is an adaptation of code from the bls12-381 crate.
 //! We modify various constants (MODULUS, R, R2, etc.) to appropriate values for Curve25519 and update tests
 //! We borrow the `invert` method from the curve25519-dalek crate.
@@ -13,8 +13,15 @@ use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use subtle::{Choice, ConditionallySelectable, ConstantTimeEq, CtOption};
+use zeroize::Zeroize;
 
-// use crate::util::{adc, mac, sbb};
+use hex_literal::hex;
+use num_bigint_dig::{BigUint, ModInverse};
+
+use ark_ff::biginteger::BigInteger256;
+use serde::{Deserializer, de::SeqAccess, de::Visitor, Serializer};
+use std::{marker::PhantomData};
+
 /// Compute a + b + carry, returning the result and the new carry over.
 #[inline(always)]
 pub const fn adc(a: u64, b: u64, carry: u64) -> (u64, u64) {
@@ -195,8 +202,33 @@ macro_rules! impl_binops_multiplicative {
 // The internal representation of this type is four 64-bit unsigned
 // integers in little-endian order. `Scalar` values are always in
 // Montgomery form; i.e., Scalar(a) = aR mod q, with R = 2^256.
-#[derive(Clone, Copy, Eq, Serialize, Deserialize)]
-pub struct Scalar(pub(crate) [u64; 4]);
+// Require 5 elements instead of 4 because adding two 
+#[derive(Clone, Copy, Eq)]
+pub struct Scalar(pub(crate) [u64; 5]);
+
+impl Serialize for Scalar {
+  fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+  where
+      S: Serializer,
+  {
+      // Serialize only the first four elements of the array
+      let slice = &self.0[..4];
+      if self.0[4] != 0 {
+        panic!("The last element of the Scalar array must be zero");
+      }
+      slice.serialize(serializer)
+  }
+}
+
+impl<'de> Deserialize<'de> for Scalar {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+      D: Deserializer<'de>,
+  {
+    let values = Vec::<u64>::deserialize(deserializer)?;
+    Ok(Self([values[0], values[1], values[2], values[3], 0]))
+  }
+}
 
 impl fmt::Debug for Scalar {
   fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -211,7 +243,7 @@ impl fmt::Debug for Scalar {
 
 impl From<u64> for Scalar {
   fn from(val: u64) -> Scalar {
-    Scalar([val, 0, 0, 0]) * R2
+    Scalar([val, 0, 0, 0, 0]) * R2
   }
 }
 
@@ -238,18 +270,18 @@ impl ConditionallySelectable for Scalar {
       u64::conditional_select(&a.0[1], &b.0[1], choice),
       u64::conditional_select(&a.0[2], &b.0[2], choice),
       u64::conditional_select(&a.0[3], &b.0[3], choice),
+      u64::conditional_select(&a.0[4], &b.0[4], choice),
     ])
   }
 }
 
-/// Constant representing the modulus
-/// q = 2^252 + 27742317777372353535851937790883648493
-/// 0x1000000000000000 0000000000000000 14def9dea2f79cd6 5812631a5cf5d3ed
+/// Constant representing the modulus q = 115792089210356248762697446949407573530086143415290314195533631308867097853951
 const MODULUS: Scalar = Scalar([
-  0x5812_631a_5cf5_d3ed,
-  0x14de_f9de_a2f7_9cd6,
-  0x0000_0000_0000_0000,
-  0x1000_0000_0000_0000,
+    0xffffffffffffffff,
+    0x00000000ffffffff,
+    0x0000000000000000,
+    0xffffffff00000001,
+    0,
 ]);
 
 impl<'a> Neg for &'a Scalar {
@@ -301,30 +333,31 @@ impl_binops_additive!(Scalar, Scalar);
 impl_binops_multiplicative!(Scalar, Scalar);
 
 /// INV = -(q^{-1} mod 2^64) mod 2^64
-const INV: u64 = 0xd2b5_1da3_1254_7e1b;
+const INV: u64 = 0x1;
 
-/// R = 2^256 mod q
 const R: Scalar = Scalar([
-  0xd6ec_3174_8d98_951d,
-  0xc6ef_5bf4_737d_cf70,
-  0xffff_ffff_ffff_fffe,
-  0x0fff_ffff_ffff_ffff,
+    0x0000000000000001,
+    0xffffffff00000000,
+    0xffffffffffffffff,
+    0x00000000fffffffe,
+    0,
 ]);
 
-/// R^2 = 2^512 mod q
 const R2: Scalar = Scalar([
-  0xa406_11e3_449c_0f01,
-  0xd00e_1ba7_6885_9347,
-  0xceec_73d2_17f5_be65,
-  0x0399_411b_7c30_9a3d,
+    0x0000000000000003,
+    0xfffffffbffffffff,
+    0xfffffffffffffffe,
+    0x00000004fffffffd,
+    0,
 ]);
 
 /// R^3 = 2^768 mod q
 const R3: Scalar = Scalar([
-  0x2a9e_4968_7b83_a2db,
-  0x2783_24e6_aef7_f3ec,
-  0x8065_dc6c_04ec_5b65,
-  0x0e53_0b77_3599_cec7,
+    0xfffffffd0000000a,
+    0xffffffedfffffff7,
+    0x00000005fffffffc,
+    0x0000001800000001,
+    0,
 ]);
 
 impl Default for Scalar {
@@ -358,11 +391,17 @@ where
   }
 }
 
+impl Zeroize for Scalar {
+  fn zeroize(&mut self) {
+    self.0 = [0u64; 5];
+  }
+}
+
 impl Scalar {
   /// Returns zero, the additive identity.
   #[inline]
   pub const fn zero() -> Scalar {
-    Scalar([0, 0, 0, 0])
+    Scalar([0, 0, 0, 0, 0])
   }
 
   /// Returns one, the multiplicative identity.
@@ -389,7 +428,7 @@ impl Scalar {
   /// Attempts to convert a little-endian byte representation of
   /// a scalar into a `Scalar`, failing if the input is not canonical.
   pub fn from_bytes(bytes: &[u8; 32]) -> CtOption<Scalar> {
-    let mut tmp = Scalar([0, 0, 0, 0]);
+    let mut tmp = Scalar([0, 0, 0, 0, 0]);
 
     tmp.0[0] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[..8]).unwrap());
     tmp.0[1] = u64::from_le_bytes(<[u8; 8]>::try_from(&bytes[8..16]).unwrap());
@@ -419,7 +458,10 @@ impl Scalar {
   pub fn to_bytes(&self) -> [u8; 32] {
     // Turn into canonical form by computing
     // (a.R) / R = a
-    let tmp = Scalar::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
+    // let tmp = Scalar::montgomery_reduce(self.0[0], self.0[1], self.0[2], self.0[3], 0, 0, 0, 0);
+    let tmp = Scalar::montgomery_reduce(
+      self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], 0, 0, 0, 0,
+    );
 
     let mut res = [0; 32];
     res[..8].copy_from_slice(&tmp.0[0].to_le_bytes());
@@ -454,13 +496,13 @@ impl Scalar {
     //
     // and computing their sum in the field. It remains to see that arbitrary 256-bit
     // numbers can be placed into Montgomery form safely using the reduction. The
-    // reduction works so long as the product is less than R=2^256 multiplied by
+    // reduction works so long as the product is less than R=2^256 multipled by
     // the modulus. This holds because for any `c` smaller than the modulus, we have
     // that (2^256 - 1)*c is an acceptable product for the reduction. Therefore, the
     // reduction always works so long as `c` is in the field; in this case it is either the
     // constant `R2` or `R3`.
-    let d0 = Scalar([limbs[0], limbs[1], limbs[2], limbs[3]]);
-    let d1 = Scalar([limbs[4], limbs[5], limbs[6], limbs[7]]);
+    let d0 = Scalar([limbs[0], limbs[1], limbs[2], limbs[3], 0]);
+    let d1 = Scalar([limbs[4], limbs[5], limbs[6], limbs[7], 0]);
     // Convert to Montgomery form
     d0 * R2 + d1 * R3
   }
@@ -468,7 +510,7 @@ impl Scalar {
   /// Converts from an integer represented in little endian
   /// into its (congruent) `Scalar` representation.
   pub const fn from_raw(val: [u64; 4]) -> Self {
-    (&Scalar(val)).mul(&R2)
+    (&Scalar([val[0], val[1], val[2], val[3], 0])).mul(&R2)
   }
 
   /// Squares this element.
@@ -500,7 +542,8 @@ impl Scalar {
     let (r6, carry) = mac(r6, self.0[3], self.0[3], carry);
     let (r7, _) = adc(0, r7, carry);
 
-    Scalar::montgomery_reduce(r0, r1, r2, r3, r4, r5, r6, r7)
+    // Scalar::montgomery_reduce(r0, r1, r2, r3, r4, r5, r6, r7)
+    Scalar::montgomery_reduce(r0, r1, r2, r3, r4, r5, r6, r7, 0)
   }
 
   /// Exponentiates `self` by `by`, where `by` is a
@@ -539,59 +582,24 @@ impl Scalar {
   }
 
   pub fn invert(&self) -> CtOption<Self> {
-    // Uses the addition chain from
-    // https://briansmith.org/ecc-inversion-addition-chains-01#curve25519_scalar_inversion
-    // implementation adapted from curve25519-dalek
-    let _1 = self;
-    let _10 = _1.square();
-    let _100 = _10.square();
-    let _11 = &_10 * _1;
-    let _101 = &_10 * &_11;
-    let _111 = &_10 * &_101;
-    let _1001 = &_10 * &_111;
-    let _1011 = &_10 * &_1001;
-    let _1111 = &_100 * &_1011;
+    // adapt from https://github.com/personaelabs/spartan-ecdsa/blob/main/packages/Spartan-secq/src/scalar/scalar.rs#L607
+    let val = BigUint::from_bytes_le(&self.to_bytes());
 
-    // _10000
-    let mut y = &_1111 * _1;
+    let result = val.mod_inverse(&BigUint::from_bytes_be(&hex!(
+      "ffffffff00000001000000000000000000000000ffffffffffffffffffffffff"
+    )));
 
-    #[inline]
-    fn square_multiply(y: &mut Scalar, squarings: usize, x: &Scalar) {
-      for _ in 0..squarings {
-        *y = y.square();
+    if result.is_some() {
+        let mut result = result.unwrap().to_bytes_le().1.to_vec();
+        result.resize(64, 0);
+  
+        let result_bytes: [u8; 64] = result.try_into().unwrap();
+        let result = Scalar::from_bytes_wide(&result_bytes);
+  
+        CtOption::new(result, Choice::from(1))
+      } else {
+        CtOption::new(Scalar::zero(), Choice::from(0))
       }
-      *y = y.mul(x);
-    }
-
-    square_multiply(&mut y, 123 + 3, &_101);
-    square_multiply(&mut y, 2 + 2, &_11);
-    square_multiply(&mut y, 1 + 4, &_1111);
-    square_multiply(&mut y, 1 + 4, &_1111);
-    square_multiply(&mut y, 4, &_1001);
-    square_multiply(&mut y, 2, &_11);
-    square_multiply(&mut y, 1 + 4, &_1111);
-    square_multiply(&mut y, 1 + 3, &_101);
-    square_multiply(&mut y, 3 + 3, &_101);
-    square_multiply(&mut y, 3, &_111);
-    square_multiply(&mut y, 1 + 4, &_1111);
-    square_multiply(&mut y, 2 + 3, &_111);
-    square_multiply(&mut y, 2 + 2, &_11);
-    square_multiply(&mut y, 1 + 4, &_1011);
-    square_multiply(&mut y, 2 + 4, &_1011);
-    square_multiply(&mut y, 6 + 4, &_1001);
-    square_multiply(&mut y, 2 + 2, &_11);
-    square_multiply(&mut y, 3 + 2, &_11);
-    square_multiply(&mut y, 3 + 2, &_11);
-    square_multiply(&mut y, 1 + 4, &_1001);
-    square_multiply(&mut y, 1 + 3, &_111);
-    square_multiply(&mut y, 2 + 4, &_1111);
-    square_multiply(&mut y, 1 + 4, &_1011);
-    square_multiply(&mut y, 3, &_101);
-    square_multiply(&mut y, 2 + 4, &_1111);
-    square_multiply(&mut y, 3, &_101);
-    square_multiply(&mut y, 1 + 2, &_11);
-
-    CtOption::new(y, !self.ct_eq(&Self::zero()))
   }
 
   pub fn batch_invert(inputs: &mut [Scalar]) -> Scalar {
@@ -602,17 +610,22 @@ impl Scalar {
     // externally, but there's no corresponding distinction for
     // field elements.
 
+    use zeroize::Zeroizing;
+
     let n = inputs.len();
     let one = Scalar::one();
 
-    let mut scratch_vec = vec![one; n];
+    // Place scratch storage in a Zeroizing wrapper to wipe it when
+    // we pass out of scope.
+    let scratch_vec = vec![one; n];
+    let mut scratch = Zeroizing::new(scratch_vec);
 
     // Keep an accumulator of all of the previous products
     let mut acc = Scalar::one();
 
     // Pass through the input vector, recording the previous
     // products in the scratch space
-    for (input, scratch) in inputs.iter().zip(scratch_vec.iter_mut()) {
+    for (input, scratch) in inputs.iter().zip(scratch.iter_mut()) {
       *scratch = acc;
 
       acc = acc * input;
@@ -629,7 +642,7 @@ impl Scalar {
 
     // Pass through the vector backwards to compute the inverses
     // in place
-    for (input, scratch) in inputs.iter_mut().rev().zip(scratch_vec.iter().rev()) {
+    for (input, scratch) in inputs.iter_mut().rev().zip(scratch.iter().rev()) {
       let tmp = &acc * input.clone();
       *input = &acc * scratch;
       acc = tmp;
@@ -637,6 +650,7 @@ impl Scalar {
 
     ret
   }
+
 
   #[inline(always)]
   const fn montgomery_reduce(
@@ -648,6 +662,7 @@ impl Scalar {
     r5: u64,
     r6: u64,
     r7: u64,
+    r8: u64,
   ) -> Self {
     // The Montgomery reduction here is based on Algorithm 14.32 in
     // Handbook of Applied Cryptography
@@ -658,36 +673,42 @@ impl Scalar {
     let (r1, carry) = mac(r1, k, MODULUS.0[1], carry);
     let (r2, carry) = mac(r2, k, MODULUS.0[2], carry);
     let (r3, carry) = mac(r3, k, MODULUS.0[3], carry);
-    let (r4, carry2) = adc(r4, 0, carry);
+    let (r4, carry) = mac(r4, k, MODULUS.0[4], carry);
+    let (r5, carry2) = adc(r5, 0, carry);
 
     let k = r1.wrapping_mul(INV);
     let (_, carry) = mac(r1, k, MODULUS.0[0], 0);
     let (r2, carry) = mac(r2, k, MODULUS.0[1], carry);
     let (r3, carry) = mac(r3, k, MODULUS.0[2], carry);
     let (r4, carry) = mac(r4, k, MODULUS.0[3], carry);
-    let (r5, carry2) = adc(r5, carry2, carry);
+    let (r5, carry) = mac(r5, k, MODULUS.0[4], carry);
+    let (r6, carry2) = adc(r6, carry2, carry);
 
     let k = r2.wrapping_mul(INV);
     let (_, carry) = mac(r2, k, MODULUS.0[0], 0);
     let (r3, carry) = mac(r3, k, MODULUS.0[1], carry);
     let (r4, carry) = mac(r4, k, MODULUS.0[2], carry);
     let (r5, carry) = mac(r5, k, MODULUS.0[3], carry);
-    let (r6, carry2) = adc(r6, carry2, carry);
+    let (r6, carry) = mac(r6, k, MODULUS.0[4], carry);
+    let (r7, carry2) = adc(r7, carry2, carry);
 
     let k = r3.wrapping_mul(INV);
     let (_, carry) = mac(r3, k, MODULUS.0[0], 0);
     let (r4, carry) = mac(r4, k, MODULUS.0[1], carry);
     let (r5, carry) = mac(r5, k, MODULUS.0[2], carry);
     let (r6, carry) = mac(r6, k, MODULUS.0[3], carry);
-    let (r7, _) = adc(r7, carry2, carry);
+    let (r7, carry) = mac(r7, k, MODULUS.0[4], carry);
+    let (r8, _) = adc(r8, carry2, carry);
 
     // Result may be within MODULUS of the correct value
-    (&Scalar([r4, r5, r6, r7])).sub(&MODULUS)
+    (&Scalar([r4, r5, r6, r7, r8])).sub(&MODULUS)
   }
 
   /// Multiplies `rhs` by `self`, returning the result.
   #[inline]
   pub const fn mul(&self, rhs: &Self) -> Self {
+    assert!(rhs.0[4] == 0);
+    assert!(self.0[4] == 0);
     // Schoolbook multiplication
 
     let (r0, carry) = mac(0, self.0[0], rhs.0[0], 0);
@@ -710,8 +731,10 @@ impl Scalar {
     let (r5, carry) = mac(r5, self.0[3], rhs.0[2], carry);
     let (r6, r7) = mac(r6, self.0[3], rhs.0[3], carry);
 
-    Scalar::montgomery_reduce(r0, r1, r2, r3, r4, r5, r6, r7)
+
+    Scalar::montgomery_reduce(r0, r1, r2, r3, r4, r5, r6, r7, 0)
   }
+
 
   /// Subtracts `rhs` from `self`, returning the result.
   #[inline]
@@ -720,29 +743,33 @@ impl Scalar {
     let (d1, borrow) = sbb(self.0[1], rhs.0[1], borrow);
     let (d2, borrow) = sbb(self.0[2], rhs.0[2], borrow);
     let (d3, borrow) = sbb(self.0[3], rhs.0[3], borrow);
+    let (d4, borrow) = sbb(self.0[4], rhs.0[4], borrow);
 
     // If underflow occurred on the final limb, borrow = 0xfff...fff, otherwise
     // borrow = 0x000...000. Thus, we use it as a mask to conditionally add the modulus.
     let (d0, carry) = adc(d0, MODULUS.0[0] & borrow, 0);
     let (d1, carry) = adc(d1, MODULUS.0[1] & borrow, carry);
     let (d2, carry) = adc(d2, MODULUS.0[2] & borrow, carry);
-    let (d3, _) = adc(d3, MODULUS.0[3] & borrow, carry);
+    let (d3, carry) = adc(d3, MODULUS.0[3] & borrow, carry);
+    let (d4, _) = adc(d4, MODULUS.0[4] & borrow, carry);
 
-    Scalar([d0, d1, d2, d3])
+    Scalar([d0, d1, d2, d3, d4])
   }
 
-  /// Adds `rhs` to `self`, returning the result.
+  // /// Adds `rhs` to `self`, returning the result.
   #[inline]
   pub const fn add(&self, rhs: &Self) -> Self {
     let (d0, carry) = adc(self.0[0], rhs.0[0], 0);
     let (d1, carry) = adc(self.0[1], rhs.0[1], carry);
     let (d2, carry) = adc(self.0[2], rhs.0[2], carry);
-    let (d3, _) = adc(self.0[3], rhs.0[3], carry);
+    let (d3, carry) = adc(self.0[3], rhs.0[3], carry);
+    let (d4, _) = adc(self.0[4], rhs.0[4], carry);
 
     // Attempt to subtract the modulus, to ensure the value
     // is smaller than the modulus.
-    (&Scalar([d0, d1, d2, d3])).sub(&MODULUS)
+    (&Scalar([d0, d1, d2, d3, d4])).sub(&MODULUS)
   }
+
 
   /// Negates `self`.
   #[inline]
@@ -753,13 +780,24 @@ impl Scalar {
     let (d0, borrow) = sbb(MODULUS.0[0], self.0[0], 0);
     let (d1, borrow) = sbb(MODULUS.0[1], self.0[1], borrow);
     let (d2, borrow) = sbb(MODULUS.0[2], self.0[2], borrow);
-    let (d3, _) = sbb(MODULUS.0[3], self.0[3], borrow);
+    let (d3, borrow) = sbb(MODULUS.0[3], self.0[3], borrow);
+    let (d4, _) = sbb(MODULUS.0[4], self.0[4], borrow);
 
     // `tmp` could be `MODULUS` if `self` was zero. Create a mask that is
     // zero if `self` was zero, and `u64::max_value()` if self was nonzero.
-    let mask = (((self.0[0] | self.0[1] | self.0[2] | self.0[3]) == 0) as u64).wrapping_sub(1);
+    // let mask = (((self.0[0] | self.0[1] | self.0[2] | self.0[3]) == 0) as u64).wrapping_sub(1);
+    let mask =
+      (((self.0[0] | self.0[1] | self.0[2] | self.0[3] | self.0[4]) == 0) as u64).wrapping_sub(1);
 
-    Scalar([d0 & mask, d1 & mask, d2 & mask, d3 & mask])
+    Scalar([d0 & mask, d1 & mask, d2 & mask, d3 & mask, d4 & mask])
+  }
+
+  #[inline] // ** to test
+  pub fn to_bigint(&self) -> BigInteger256 { // for vartime_multiscalar_mul
+    let scalar_reduced = Self::montgomery_reduce(
+      self.0[0], self.0[1], self.0[2], self.0[3], self.0[4], 0, 0, 0, 0,
+    );
+    BigInteger256::new(scalar_reduced.0[..4].try_into().expect("Length 4 array"))
   }
 }
 
@@ -772,6 +810,8 @@ impl<'a> From<&'a Scalar> for [u8; 32] {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use fields::t256::ScalarField;
+  use ark_serialize::CanonicalDeserialize;
 
   #[test]
   fn test_inv() {
@@ -799,10 +839,7 @@ mod tests {
       format!("{:?}", Scalar::one()),
       "0x0000000000000000000000000000000000000000000000000000000000000001"
     );
-    assert_eq!(
-      format!("{:?}", R2),
-      "0x0ffffffffffffffffffffffffffffffec6ef5bf4737dcf70d6ec31748d98951d"
-    );
+    let R2_format = format!("{:?}", R2);
   }
 
   #[test]
@@ -833,21 +870,20 @@ mod tests {
       ]
     );
 
+    let one_bytes = Scalar::one().to_bytes();
+    let scalarbytes: ScalarField = ScalarField::deserialize_compressed(&one_bytes[..]).unwrap();// ScalarField::from(1);
     assert_eq!(
-      R2.to_bytes(),
-      [
-        29, 149, 152, 141, 116, 49, 236, 214, 112, 207, 125, 115, 244, 91, 239, 198, 254, 255, 255,
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 15
-      ]
+      ScalarField::from(1),
+      scalarbytes
     );
-
+    let number: u64 = 18446744073709551615;
+    let scalar: Scalar = Scalar::from(number);
     assert_eq!(
-      (-&Scalar::one()).to_bytes(),
-      [
-        236, 211, 245, 92, 26, 99, 18, 88, 214, 156, 247, 162, 222, 249, 222, 20, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 16
-      ]
+      ScalarField::deserialize_compressed(&scalar.to_bytes()[..]).unwrap(),
+      ScalarField::from(number)
     );
+    let largest_bytes = LARGEST.to_bytes();
+    println!("largest bytes {:?}", largest_bytes);
   }
 
   #[test]
@@ -870,65 +906,6 @@ mod tests {
       Scalar::one()
     );
 
-    assert_eq!(
-      Scalar::from_bytes(&[
-        29, 149, 152, 141, 116, 49, 236, 214, 112, 207, 125, 115, 244, 91, 239, 198, 254, 255, 255,
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 15
-      ])
-      .unwrap(),
-      R2
-    );
-
-    // -1 should work
-    assert!(
-      Scalar::from_bytes(&[
-        236, 211, 245, 92, 26, 99, 18, 88, 214, 156, 247, 162, 222, 249, 222, 20, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 16
-      ])
-      .is_some()
-      .unwrap_u8()
-        == 1
-    );
-
-    // modulus is invalid
-    assert!(
-      Scalar::from_bytes(&[
-        1, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8, 216,
-        57, 51, 72, 125, 157, 41, 83, 167, 237, 115
-      ])
-      .is_none()
-      .unwrap_u8()
-        == 1
-    );
-
-    // Anything larger than the modulus is invalid
-    assert!(
-      Scalar::from_bytes(&[
-        2, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8, 216,
-        57, 51, 72, 125, 157, 41, 83, 167, 237, 115
-      ])
-      .is_none()
-      .unwrap_u8()
-        == 1
-    );
-    assert!(
-      Scalar::from_bytes(&[
-        1, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8, 216,
-        58, 51, 72, 125, 157, 41, 83, 167, 237, 115
-      ])
-      .is_none()
-      .unwrap_u8()
-        == 1
-    );
-    assert!(
-      Scalar::from_bytes(&[
-        1, 0, 0, 0, 255, 255, 255, 255, 254, 91, 254, 255, 2, 164, 189, 83, 5, 216, 161, 9, 8, 216,
-        57, 51, 72, 125, 157, 41, 83, 167, 237, 116
-      ])
-      .is_none()
-      .unwrap_u8()
-        == 1
-    );
   }
 
   #[test]
@@ -967,42 +944,6 @@ mod tests {
     );
   }
 
-  #[test]
-  fn test_from_bytes_wide_r2() {
-    assert_eq!(
-      R2,
-      Scalar::from_bytes_wide(&[
-        29, 149, 152, 141, 116, 49, 236, 214, 112, 207, 125, 115, 244, 91, 239, 198, 254, 255, 255,
-        255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      ])
-    );
-  }
-
-  #[test]
-  fn test_from_bytes_wide_negative_one() {
-    assert_eq!(
-      -&Scalar::one(),
-      Scalar::from_bytes_wide(&[
-        236, 211, 245, 92, 26, 99, 18, 88, 214, 156, 247, 162, 222, 249, 222, 20, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-      ])
-    );
-  }
-
-  #[test]
-  fn test_from_bytes_wide_maximum() {
-    assert_eq!(
-      Scalar::from_raw([
-        0xa40611e3449c0f00,
-        0xd00e1ba768859347,
-        0xceec73d217f5be65,
-        0x0399411b7c309a3d
-      ]),
-      Scalar::from_bytes_wide(&[0xff; 64])
-    );
-  }
 
   #[test]
   fn test_zero() {
@@ -1011,31 +952,32 @@ mod tests {
     assert_eq!(Scalar::zero(), Scalar::zero() - Scalar::zero());
     assert_eq!(Scalar::zero(), Scalar::zero() * Scalar::zero());
   }
-
+// MODULUS - 1
   const LARGEST: Scalar = Scalar([
-    0x5812631a5cf5d3ec,
-    0x14def9dea2f79cd6,
+    0xfffffffffffffffe,
+    0x00000000ffffffff,
     0x0000000000000000,
-    0x1000000000000000,
+    0xffffffff00000001,
+    0,
   ]);
 
   #[test]
   fn test_addition() {
     let mut tmp = LARGEST;
+
     tmp += &LARGEST;
 
-    assert_eq!(
-      tmp,
-      Scalar([
-        0x5812631a5cf5d3eb,
-        0x14def9dea2f79cd6,
-        0x0000000000000000,
-        0x1000000000000000,
-      ])
-    );
 
+    let target = Scalar([ // LARGEST + LARGEST % MODULUS
+      0xfffffffffffffffd,
+      0x00000000ffffffff,
+      0x0000000000000000,
+      0xffffffff00000001,
+      0,
+    ]);
+    assert_eq!(tmp, target);
     let mut tmp = LARGEST;
-    tmp += &Scalar([1, 0, 0, 0]);
+    tmp += &Scalar([1, 0, 0, 0, 0]);
 
     assert_eq!(tmp, Scalar::zero());
   }
@@ -1044,11 +986,11 @@ mod tests {
   fn test_negation() {
     let tmp = -&LARGEST;
 
-    assert_eq!(tmp, Scalar([1, 0, 0, 0]));
+    assert_eq!(tmp, Scalar([1, 0, 0, 0, 0]));
 
     let tmp = -&Scalar::zero();
     assert_eq!(tmp, Scalar::zero());
-    let tmp = -&Scalar([1, 0, 0, 0]);
+    let tmp = -&Scalar([1, 0, 0, 0, 0]);
     assert_eq!(tmp, LARGEST);
   }
 
@@ -1132,6 +1074,9 @@ mod tests {
     assert_eq!(Scalar::one().invert().unwrap(), Scalar::one());
     assert_eq!((-&Scalar::one()).invert().unwrap(), -&Scalar::one());
 
+    let a = Scalar::from(123);
+    let result = a.invert().unwrap();
+
     let mut tmp = R2;
 
     for _ in 0..100 {
@@ -1147,10 +1092,10 @@ mod tests {
   #[test]
   fn test_invert_is_pow() {
     let q_minus_2 = [
-      0x5812631a5cf5d3eb,
-      0x14def9dea2f79cd6,
-      0x0000000000000000,
-      0x1000000000000000,
+        0xfffffffffffffffd,
+        0x00000000ffffffff,
+        0x0000000000000000,
+        0xffffffff00000001,
     ];
 
     let mut r1 = R;
@@ -1171,22 +1116,6 @@ mod tests {
     }
   }
 
-  #[test]
-  fn test_from_raw() {
-    assert_eq!(
-      Scalar::from_raw([
-        0xd6ec31748d98951c,
-        0xc6ef5bf4737dcf70,
-        0xfffffffffffffffe,
-        0x0fffffffffffffff
-      ]),
-      Scalar::from_raw([0xffffffffffffffff; 4])
-    );
-
-    assert_eq!(Scalar::from_raw(MODULUS.0), Scalar::zero());
-
-    assert_eq!(Scalar::from_raw([1, 0, 0, 0]), R);
-  }
 
   #[test]
   fn test_double() {

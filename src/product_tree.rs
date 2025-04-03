@@ -226,7 +226,6 @@ impl ProductCircuitEvalProof {
     let num_layers = len.log_2();
     let mut claim = eval;
     let mut rand: Vec<Scalar> = Vec::new();
-    //let mut num_rounds = 0;
     assert_eq!(self.proof.len(), num_layers);
     for (num_rounds, i) in (0..num_layers).enumerate() {
       let (claim_last, rand_prod) = self.proof[i].verify(claim, num_rounds, 3, transcript);
@@ -257,8 +256,8 @@ impl ProductCircuitEvalProof {
 
 impl ProductCircuitEvalProofBatched {
   pub fn prove(
-    prod_circuit_vec: &mut [&mut ProductCircuit],
-    dotp_circuit_vec: &mut [&mut DotProductCircuit],
+    prod_circuit_vec: &mut Vec<&mut ProductCircuit>,
+    dotp_circuit_vec: &mut Vec<&mut DotProductCircuit>,
     transcript: &mut Transcript,
   ) -> (Self, Vec<Scalar>) {
     assert!(!prod_circuit_vec.is_empty());
@@ -272,7 +271,7 @@ impl ProductCircuitEvalProofBatched {
       .collect::<Vec<Scalar>>();
     let mut rand = Vec::new();
     for layer_id in (0..num_layers).rev() {
-      // prepare parallel instance that share poly_C first
+      // prepare paralell instance that share poly_C first
       let len = prod_circuit_vec[0].left_vec[layer_id].len()
         + prod_circuit_vec[0].right_vec[layer_id].len();
 

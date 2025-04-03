@@ -404,7 +404,7 @@ impl DotProductProof {
   }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)] 
 pub struct DotProductProofGens {
   n: usize,
   pub gens_n: MultiCommitGens,
@@ -430,6 +430,10 @@ pub struct DotProductProofLog {
 impl DotProductProofLog {
   fn protocol_name() -> &'static [u8] {
     b"dot product proof (log)"
+  }
+
+  pub fn num_gp_elements(&self) -> usize {
+    self.bullet_reduction_proof.num_gp_elements() + 2
   }
 
   pub fn compute_dotproduct(a: &[Scalar], b: &[Scalar]) -> Scalar {

@@ -11,6 +11,8 @@ use core::ops::Index;
 use merlin::Transcript;
 use serde::{Deserialize, Serialize};
 
+use super::group::CompressedGroupExt; 
+
 #[cfg(feature = "multicore")]
 use rayon::prelude::*;
 
@@ -18,10 +20,10 @@ use rayon::prelude::*;
 pub struct DensePolynomial {
   num_vars: usize, // the number of variables in the multilinear polynomial
   len: usize,
-  Z: Vec<Scalar>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
+  pub Z: Vec<Scalar>, // evaluations of the polynomial in all the 2^num_vars Boolean inputs
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)] 
 pub struct PolyCommitmentGens {
   pub gens: DotProductProofGens,
 }
@@ -35,13 +37,14 @@ impl PolyCommitmentGens {
   }
 }
 
+#[derive(Clone)]
 pub struct PolyCommitmentBlinds {
   blinds: Vec<Scalar>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PolyCommitment {
-  C: Vec<CompressedGroup>,
+  pub C: Vec<CompressedGroup>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -121,6 +124,18 @@ impl DensePolynomial {
     DensePolynomial {
       num_vars: Z.len().log_2(),
       len: Z.len(),
+      Z,
+    }
+  }
+
+  pub fn new_bool(len: usize, start: usize, end: usize) -> Self {
+    let mut Z: Vec<Scalar> = vec![Scalar::zero(); len];
+    for i in start..end {
+      Z[i] = Scalar::one();
+    }
+    DensePolynomial {
+      num_vars: len.log_2(),
+      len,
       Z,
     }
   }
@@ -217,7 +232,6 @@ impl DensePolynomial {
     for i in 0..n {
       self.Z[i] = self.Z[i] + r * (self.Z[i + n] - self.Z[i]);
     }
-    self.Z.truncate(n); // Resize the vector Z to the new length
     self.num_vars -= 1;
     self.len = n;
   }
@@ -227,7 +241,6 @@ impl DensePolynomial {
     for i in 0..n {
       self.Z[i] = self.Z[2 * i] + r * (self.Z[2 * i + 1] - self.Z[2 * i]);
     }
-    self.Z.truncate(n); // Resize the vector Z to the new length
     self.num_vars -= 1;
     self.len = n;
   }
@@ -235,7 +248,7 @@ impl DensePolynomial {
   // returns Z(r) in O(n) time
   pub fn evaluate(&self, r: &[Scalar]) -> Scalar {
     // r must have a value for each variable
-    assert_eq!(r.len(), self.get_num_vars());
+    assert_eq!(r.len(), self.get_num_vars(), "densepoly cannot be evaluated");
     let chis = EqPolynomial::new(r.to_vec()).evals();
     assert_eq!(chis.len(), self.Z.len());
     DotProductProofLog::compute_dotproduct(&self.Z, &chis)
@@ -255,6 +268,16 @@ impl DensePolynomial {
     self.len *= 2;
     assert_eq!(self.Z.len(), self.len);
   }
+
+  pub fn extend_from_vec(&mut self, other: &Vec<Scalar>) {
+    assert_eq!(self.Z.len(), self.len);
+    assert_eq!(other.len(), self.len);
+    self.Z.extend(other);
+    self.num_vars += 1;
+    self.len *= 2;
+    assert_eq!(self.Z.len(), self.len);
+  }
+
 
   pub fn merge<'a, I>(polys: I) -> DensePolynomial
   where
@@ -309,6 +332,9 @@ impl PolyEvalProof {
     b"polynomial evaluation proof"
   }
 
+  pub fn num_gp_elements(&self) -> usize {
+    self.proof.num_gp_elements()
+  }
   pub fn prove(
     poly: &DensePolynomial,
     blinds_opt: Option<&PolyCommitmentBlinds>,
@@ -419,7 +445,7 @@ mod tests {
     // compute n = 2^\ell
     let n = ell.pow2();
     // compute m = sqrt(n) = 2^{\ell/2}
-    let m = (n as f64).sqrt() as usize;
+    let m = n.square_root();
 
     // compute vector-matrix product between L and Z viewed as a matrix
     let LZ = (0..m)
@@ -458,7 +484,7 @@ mod tests {
     let ell = r.len();
     assert!(ell % 2 == 0); // ensure ell is even
     let n = ell.pow2();
-    let m = (n as f64).sqrt() as usize;
+    let m = n.square_root();
 
     // compute row vector L
     for i in 0..m {

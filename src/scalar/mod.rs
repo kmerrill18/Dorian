@@ -1,7 +1,14 @@
-mod ristretto255;
+use fields::t256::ScalarField;
+use ark_serialize::CanonicalDeserialize;
+use ark_serialize::CanonicalSerialize;
 
-pub type Scalar = ristretto255::Scalar;
-pub type ScalarBytes = curve25519_dalek::scalar::Scalar;
+use ark_ff::PrimeField;
+
+mod scalar;
+
+pub type Scalar = scalar::Scalar;
+pub type ScalarBytes = ScalarField;
+
 
 pub trait ScalarFromPrimitives {
   fn to_scalar(self) -> Scalar;
@@ -27,10 +34,31 @@ impl ScalarFromPrimitives for bool {
 
 pub trait ScalarBytesFromScalar {
   fn decompress_scalar(s: &Scalar) -> ScalarBytes;
+  fn decompress_vector(s: &[Scalar]) -> Vec<ScalarBytes>;
 }
 
 impl ScalarBytesFromScalar for Scalar {
   fn decompress_scalar(s: &Scalar) -> ScalarBytes {
-    ScalarBytes::from_bytes_mod_order(s.to_bytes())
+    ScalarBytes::from_bigint(s.to_bigint()).unwrap()
   }
+
+  fn decompress_vector(s: &[Scalar]) -> Vec<ScalarBytes> {
+    (0..s.len())
+      .map(|i| Scalar::decompress_scalar(&s[i]))
+      .collect::<Vec<ScalarBytes>>()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  #[test]
+  fn test_decompress_scalar() {
+    for i in 0..50000 {
+      let scalars = vec![Scalar::from(i+1), Scalar::from(i+2), Scalar::from(i+3), Scalar::from(i+4), Scalar::from(i+5), Scalar::from(i+6), Scalar::from(i+7), Scalar::from(i+8), Scalar::from(i+9), Scalar::from(i+10)];
+
+      let result = Scalar::decompress_vector(&scalars);
+    }
+  }
+
 }
